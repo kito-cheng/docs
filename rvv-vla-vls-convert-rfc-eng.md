@@ -501,7 +501,7 @@ vint32x4_t clamp_min(vint32x4_t x, vint32x4_t lo) {
 ```
 
 - The result type of `x < lo` is `vmaskx4_t`. Bit `i` corresponds to lane `i`; 1 means true and 0 means false.
-- `vmaskx4_t` uses bitmask layout. Its size is `(4 + 7) / 8 = 1` byte and its alignment is 1.
+- `vmaskx4_t` uses bitmask layout. Its size is `ceil(4 / 8) = 1` byte and its alignment is 1.
 - `?:` is a lane-wise select controlled by `vmaskx4_t`.
 - The pass-by-value / return ABI rule of `vmaskx4_t` follows the matching scalable bool vector type `vbool<M>_t` where `M = ABI_VLEN / 4` (e.g. `vbool32_t` at `ABI_VLEN = 128`).
 
