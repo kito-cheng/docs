@@ -253,7 +253,7 @@ To let users **enjoy the RVV vector calling convention without porting effort**,
 - **Minimum number of elements**: **at least 2** (no `x1`, to avoid confusion with scalar).
 - **Maximum total width**: up to `ABI_VLEN × LMUL = 128 × 8 = 1024 bit`, covering all widths matching m1 / m2 / m4 / m8 under ABI_VLEN = 128.
 
-This RFC also defines a dedicated fixed-length predicate / mask type family, `vboolx<nelem>_t`, for this group. Compare operators return `vboolx<nelem>_t`, and `?:` uses that mask type for lane-wise select (see §5.2.1).
+This RFC also defines a dedicated fixed-length predicate / mask type family, `vmaskx<nelem>_t`, for this group. Compare operators return `vmaskx<nelem>_t`, and `?:` uses that mask type for lane-wise select (see §5.2.1).
 
 ### 5.2 Type attribute
 
@@ -274,12 +274,12 @@ The first parameter is the size of the fixed vector (in bytes). The second param
 
 #### 5.2.1 Why a new `rvv_vls_vector_size` instead of reusing GNU `vector_size`
 
-The fixed-length data vector types in this RFC follow GNU-vector-like lane-wise compare semantics, but the compare result type is a dedicated fixed-length mask type: `vboolx<nelem>_t`. Each lane maps to one bit in the mask. Bit value 1 means true, bit value 0 means false. For the conditional operator `?:`, this RFC defines that when the condition is `vboolx<nelem>_t`, `cond ? lhs : rhs` does a lane-wise select. So C and C++ can use the same form.
+The fixed-length data vector types in this RFC follow GNU-vector-like lane-wise compare semantics, but the compare result type is a dedicated fixed-length mask type: `vmaskx<nelem>_t`. Each lane maps to one bit in the mask. Bit value 1 means true, bit value 0 means false. For the conditional operator `?:`, this RFC defines that when the condition is `vmaskx<nelem>_t`, `cond ? lhs : rhs` does a lane-wise select. So C and C++ can use the same form.
 
 In other words, this RFC does not claim "every operator is fully equal to GNU vector". Instead:
 
-- **compare**: still works lane by lane, but returns `vboolx<nelem>_t` rather than a same-width integer vector.
-- **`?:`**: uses `vboolx<nelem>_t` as the condition type and performs lane-wise select in both C and C++.
+- **compare**: still works lane by lane, but returns `vmaskx<nelem>_t` rather than a same-width integer vector.
+- **`?:`**: uses `vmaskx<nelem>_t` as the condition type and performs lane-wise select in both C and C++.
 
 Since the data-vector operators still mostly follow GNU vector, reusing GNU `vector_size` looks like the easiest choice. But this RFC still chooses a separate `rvv_vls_vector_size` attribute, for these reasons:
 
@@ -290,26 +290,27 @@ Since the data-vector operators still mostly follow GNU vector, reusing GNU `vec
 
 The specific limits for `?:` are:
 
-- The condition must be `vboolx<nelem>_t`, usually produced by a compare on `v<type><width>x<nelem>_t`.
+- The condition must be `vmaskx<nelem>_t`, usually produced by a compare on `v<type><width>x<nelem>_t`.
 - `lhs` and `rhs` must be the same `v<type><width>x<nelem>_t`.
 - This RFC **does not define** the scalar broadcast form `cond ? scalar : vec` or `cond ? vec : scalar`.
 
-This RFC defines the layout and ABI of `vboolx<nelem>_t` as follows:
+This RFC defines the layout and ABI of `vmaskx<nelem>_t` as follows:
 
 - **Layout**: bitmask form. Lane `i` maps to bit `i`.
-- **Size**: `sizeof(vboolx<nelem>_t) = max(nelem / 8, 1)` bytes.
-- **Alignment**: `alignof(vboolx<nelem>_t) = 1`.
-- **ABI mapping**: pass-by-value and return follow the same psABI rule as the matching scalable bool vector type `vbool<M>_t`. The exact `M` is the one selected by the element-width / lane-count relation of the producing or consuming operation.
+- **Size**: `sizeof(vmaskx<nelem>_t) = (nelem + 7) / 8` bytes (i.e. `ceil(nelem / 8)`).
+- **Alignment**: `alignof(vmaskx<nelem>_t) = 1`.
+- **Valid `nelem`**: `nelem` must be a power of 2 in `[2, ABI_VLEN]` and must satisfy `ABI_VLEN % nelem == 0`. This guarantees a unique matching scalable `vbool<M>_t` exists.
+- **ABI mapping**: pass-by-value and return follow the same psABI rule as the matching scalable bool vector type `vbool<M>_t`, where **`M = ABI_VLEN / nelem`**. `M` is fully determined by the type and the active `ABI_VLEN`; it does not depend on the producing or consuming operation.
 
-The operator set of `vboolx<nelem>_t` is intentionally small and mask-oriented:
+The operator set of `vmaskx<nelem>_t` is intentionally small and mask-oriented:
 
 - **Allowed unary operators**: `!`, `~`.
 - **Allowed binary operators**: bitwise `&`, `|`, `^`.
 - **Allowed comparison operators**: `==`, `!=`.
-- **Allowed conditional form**: `cond ? lhs : rhs` where `cond` is `vboolx<nelem>_t` and `lhs` / `rhs` are the same `v<type><width>x<nelem>_t`.
+- **Allowed conditional form**: `cond ? lhs : rhs` where `cond` is `vmaskx<nelem>_t` and `lhs` / `rhs` are the same `v<type><width>x<nelem>_t`.
 - **Allowed assignment forms**: initialization, copy assignment, and the compound assignments `&=`, `|=`, `^=`.
 
-The following operators are **not** defined for `vboolx<nelem>_t`:
+The following operators are **not** defined for `vmaskx<nelem>_t`:
 
 - **Element access**: `[]`.
 - **Short-circuit logical operators**: `&&`, `||`.
@@ -319,7 +320,7 @@ The following operators are **not** defined for `vboolx<nelem>_t`:
 - **Increment / decrement**: `++`, `--`.
 - **Dereference and member access**: `*`, `->`, `.`.
 
-Reason: `vboolx<nelem>_t` is a packed predicate container, not a data vector. The allowed operators are only those that map cleanly to lane-wise mask algebra without implying scalar truthiness, element lvalues, or arithmetic interpretation.
+Reason: `vmaskx<nelem>_t` is a packed predicate container, not a data vector. The allowed operators are only those that map cleanly to lane-wise mask algebra without implying scalar truthiness, element lvalues, or arithmetic interpretation.
 
 ### 5.3 Why we need this type layer: avoid the cost of the default ABI
 
@@ -356,7 +357,7 @@ vint32m1_t sv = __riscv_convert_vector(vint32m1_t, v);   // OK, writes to low pa
 vint32x4_t v2 = __riscv_convert_vector(vint32x4_t, sv);  // OK, reads low part
 ```
 
-This RFC only defines `__riscv_convert_vector` for scalable ↔ fixed **data** vectors (integer / float / bf16). `vboolx<nelem>_t` is part of this RFC for compare / select and ABI purposes, but mask conversion intrinsics between `vboolx<nelem>_t` and scalable `vbool*` are still outside the scope of this proposal.
+This RFC only defines `__riscv_convert_vector` for scalable ↔ fixed **data** vectors (integer / float / bf16). `vmaskx<nelem>_t` is part of this RFC for compare / select and ABI purposes, but mask conversion intrinsics between `vmaskx<nelem>_t` and scalable `vbool*` are still outside the scope of this proposal.
 
 ## 6. Usage Examples
 
@@ -398,7 +399,7 @@ void sat_add_and_store(int32x4_t v, int32_t addend, int32_t *out) {
 
 A plain GNU vector does not enable vector cc (no `rvv_vls_vector_size` attribute). But it can still be used as the src/dst of `__riscv_convert_vector`. This lets the user, inside the callee, switch to a scalable intrinsic, do work that operators cannot express, and write out the result through an RVV store.
 
-### 6.3 Compare / select (`vboolx<N>_t` + lane-wise `?:`)
+### 6.3 Compare / select (`vmaskx<N>_t` + lane-wise `?:`)
 
 ```c
 vint32x4_t clamp_min(vint32x4_t x, vint32x4_t lo) {
@@ -406,10 +407,10 @@ vint32x4_t clamp_min(vint32x4_t x, vint32x4_t lo) {
 }
 ```
 
-- The result type of `x < lo` is `vboolx4_t`. Bit `i` corresponds to lane `i`; 1 means true and 0 means false.
-- `vboolx4_t` uses bitmask layout. Its size is `max(4 / 8, 1) = 1` byte and its alignment is 1.
-- `?:` is a lane-wise select controlled by `vboolx4_t`.
-- The pass-by-value / return ABI rule of `vboolx4_t` follows the matching scalable bool vector type `vbool<M>_t`.
+- The result type of `x < lo` is `vmaskx4_t`. Bit `i` corresponds to lane `i`; 1 means true and 0 means false.
+- `vmaskx4_t` uses bitmask layout. Its size is `max(4 / 8, 1) = 1` byte and its alignment is 1.
+- `?:` is a lane-wise select controlled by `vmaskx4_t`.
+- The pass-by-value / return ABI rule of `vmaskx4_t` follows the matching scalable bool vector type `vbool<M>_t` where `M = ABI_VLEN / 4` (e.g. `vbool32_t` at `ABI_VLEN = 128`).
 
 ## 7. Open Issues
 
