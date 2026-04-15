@@ -333,7 +333,7 @@ This section defines the predicate / mask type family `vmaskx<nelem>_t` used by 
 ##### 5.2.2.1 Layout, size, alignment, and ABI
 
 - **Layout**: bitmask form. Lane `i` maps to bit `i`.
-- **Size**: `sizeof(vmaskx<nelem>_t) = (nelem + 7) / 8` bytes (i.e. `ceil(nelem / 8)`).
+- **Size**: `sizeof(vmaskx<nelem>_t) = ceil(nelem / 8)` bytes.
 - **Alignment**: `alignof(vmaskx<nelem>_t) = 1`.
 - **Valid `nelem`**: `nelem` must be a power of 2 in `[2, ABI_VLEN]` and must satisfy `ABI_VLEN % nelem == 0`. This guarantees a unique matching scalable `vbool<M>_t` exists.
 - **ABI mapping**: pass-by-value and return follow the same psABI rule as the matching scalable bool vector type `vbool<M>_t`, where **`M = ABI_VLEN / nelem`**. `M` is fully determined by the type and the active `ABI_VLEN`; it does not depend on the producing or consuming operation.
