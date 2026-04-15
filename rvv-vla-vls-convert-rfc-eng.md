@@ -43,7 +43,17 @@ GNU vectors can already express most common operations through C operators (`+`,
 
 In other words, the convert intrinsic is a **bridge**. It lets users write code on top of the friendly fixed-length vector interface, and still switch back to scalable intrinsics to use RVV features, while keeping the semantics compatible. Without it, users are left with two bad choices: rewrite everything as scalable intrinsics, or go through memory to change the type.
 
-One thing to note: when a fixed vector is converted to a larger scalable vector, only the **low elements** (the range matching the fixed vector) are guaranteed to be defined. So any later RVV operation must make sure its active result **does not observe source elements above that range**. For lane-wise arithmetic or logic operations where `vl` is clearly limited, and each active lane only depends on the matching active source lane, this is usually not a problem. But for operations that read data across lanes, or that may indirectly index into higher elements (for example some uses of gather / permutation / slide / reduction), the user must make sure the semantics do not touch the undefined high part.
+### 1.2.1 Undefined high part: the main correctness hazard
+
+When a fixed vector is converted to a larger scalable vector, only the **low elements** (the range matching the fixed vector) are guaranteed to be defined. Any RVV operation that runs on the resulting scalable value must make sure its **active result does not observe source elements above that range**.
+
+- **Usually safe**: lane-wise arithmetic / logic operations (`vadd`, `vand`, `vsadd`, ...) where `vl` is explicitly limited to the fixed-vector lane count. Each active lane only depends on the matching active source lane, so undefined high lanes never feed the result.
+- **Usually unsafe** unless the user constrains `vl` and mask carefully:
+  - **Cross-lane reductions** (`vredsum`, `vredmax`, ...) — by definition fold all active lanes, so any active lane above the fixed range pulls undefined data into the scalar result.
+  - **Slide / permute / gather** (`vslideup`, `vslidedown`, `vrgather`, ...) — can move undefined high lanes into the low part of the destination.
+  - **Segment / indexed loads and stores** when the index vector has active lanes above the fixed range.
+
+The rule of thumb: after `__riscv_convert_vector(<scalable>, fixed)`, treat everything above `fixed_lanes` as poison. If an RVV operation could read or fold those lanes into an active result, you must either restrict `vl` to `fixed_lanes` or apply a mask that disables them. §4.3 revisits the same rule at spec level with concrete safe / unsafe examples.
 
 ### 1.3 Prior art: Arm SVE / NEON Bridge
 
