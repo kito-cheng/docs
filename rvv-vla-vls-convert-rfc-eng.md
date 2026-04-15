@@ -530,6 +530,66 @@ vint32x4_t clamp_min(vint32x4_t x, vint32x4_t lo) {
 - `?:` is a lane-wise select controlled by `vmaskx4_t`.
 - The pass-by-value / return ABI rule of `vmaskx4_t` follows the matching scalable bool vector type `vbool<M>_t` where `M = ABI_VLEN / 4` (e.g. `vbool32_t` at `ABI_VLEN = 128`).
 
+### 6.4 Cross-lane reduction (honoring §1.2.1)
+
+`vredsum` folds **all active lanes** into a scalar, so it is the textbook case where the undefined high part of `__riscv_convert_vector` matters. The fix is simple: pin `vl` to the fixed lane count so the undefined lanes are inactive.
+
+```c
+int32_t sum4(vint32x4_t v) {
+    vint32m1_t sv = __riscv_convert_vector(vint32m1_t, v);
+
+    // vl = 4 confines the reduction to the 4 defined lanes. Without this,
+    // on a VLEN>128 target, vredsum would fold undefined high lanes into
+    // the result.
+    vint32m1_t zero = __riscv_vmv_v_x_i32m1(0, 4);
+    vint32m1_t acc  = __riscv_vredsum_vs_i32m1_i32m1(sv, zero, 4);
+    return __riscv_vmv_x_s_i32m1_i32(acc);
+}
+```
+
+The same pattern applies to `vredmax` / `vredmin` / `vredand` / `vredor` / `vredxor` and to `vslide*` / `vrgather` whenever the index or slide amount could bring a lane above the fixed range into the active set.
+
+### 6.5 Mask interop: the current gap
+
+Comparisons on `v<type><width>x<nelem>_t` produce `vmaskx<nelem>_t`. Many useful RVV mask intrinsics (`__riscv_vcpop`, `__riscv_vfirst`, mask logic with a different SEW / LMUL context, masked loads on a scalable data vector) take scalable `vbool<M>_t`. This RFC does not provide a conversion between the two (see §7).
+
+What users **can** do today with only this RFC:
+
+```c
+// Count how many lanes satisfy x > 0 using the fixed-length surface.
+int popcount_gt0(vint32x4_t x) {
+    vint32x4_t zero = {0, 0, 0, 0};
+    vmaskx4_t  m    = (x > zero);
+
+    // The fixed surface has no dedicated popcount on vmaskx<N>_t. We fall
+    // back through the data-vector select and scalar add, which the
+    // compiler can lower to a mask popcount on RVV.
+    vint32x4_t ones = m ? (vint32x4_t){1, 1, 1, 1} : zero;
+
+    // Sum the 4 lanes. (Once §6.4-style reduction is written with a
+    // scalable bridge, it works the same way.)
+    int32_t s = 0;
+    for (int i = 0; i < 4; ++i) s += ones[i];
+    return s;
+}
+```
+
+What users **cannot** write today without the follow-up mask-conversion intrinsic:
+
+```c
+// NOT SUPPORTED by this RFC: there is no standard way to feed a
+// vmaskx4_t into a scalable mask intrinsic.
+//
+// int popcount_gt0(vint32x4_t x) {
+//     vint32x4_t zero = {0, 0, 0, 0};
+//     vmaskx4_t  m    = (x > zero);
+//     vbool32_t  sm   = __riscv_convert_mask(vbool32_t, m);  // future work
+//     return __riscv_vcpop_m_b32(sm, 4);
+// }
+```
+
+This is the main motivation for the "mask conversion intrinsics" open issue in §7.
+
 ## 7. Open Issues
 
 - **Alignment choice for `v<type><width>x<nelem>_t`**: this RFC picks `alignof = element_bits / 8` (natural per-lane alignment) to match GNU vector habits and let single-lane scalar loads/stores align trivially. An alternative is `alignof = ABI_VLEN / 8` (128-bit / full-vector alignment at the default), which would match the natural alignment of a whole vector register and may let the compiler use aligned loads/stores unconditionally, at the cost of wasting up to `ABI_VLEN / 8 - element_bits / 8` bytes per array element when these types appear inside arrays or packed structs. The trade-off between "friendly to arrays / struct layout" and "aligned whole-vector load/store" is open; we may revisit before finalizing.
