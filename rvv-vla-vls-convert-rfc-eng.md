@@ -265,9 +265,20 @@ To let users **enjoy the RVV vector calling convention without porting effort**,
   - Examples: `vint32x4_t`, `vfloat64x2_t`, `vbfloat16x8_t`, `vuint8x16_t`.
 - **Element types**: `bf16`, `fp16`, `fp32`, `fp64`, `[u]int{8,16,32,64}`.
 - **Minimum number of elements**: **at least 2** (no `x1`, to avoid confusion with scalar).
-- **Maximum total width**: up to `ABI_VLEN × LMUL = 128 × 8 = 1024 bit`, covering all widths matching m1 / m2 / m4 / m8 under ABI_VLEN = 128.
+- **Valid `nelem`**: `nelem` must be a power of 2 such that the total bit width `nelem × element_bits` equals `LMUL × ABI_VLEN` for some `LMUL ∈ {1/8, 1/4, 1/2, 1, 2, 4, 8}`, subject to per-element legality (for example `LMUL = 1/8` is illegal when `element_bits = 64`, matching the scalable `vint64mf8_t` illegal case). Non-power-of-2 lane counts and widths not matching any legal LMUL are rejected with a compile-time error.
+- **Maximum total width**: `LMUL = 8 × ABI_VLEN` (1024 bit at default `ABI_VLEN = 128`).
+- **Minimum total width**: `LMUL = 1/8 × ABI_VLEN` (16 bit at default `ABI_VLEN = 128`), when legal for the element type.
 
-This RFC also defines a dedicated fixed-length predicate / mask type family, `vmaskx<nelem>_t`, for this group. Compare operators return `vmaskx<nelem>_t`, and `?:` uses that mask type for lane-wise select (see §5.2.1).
+The legal `nelem` values per element type at the default `ABI_VLEN = 128` are:
+
+| Element type | Legal `nelem` (at `ABI_VLEN = 128`) |
+|---|---|
+| `i8`, `u8` | 2, 4, 8, 16, 32, 64, 128 |
+| `i16`, `u16`, `f16`, `bf16` | 2, 4, 8, 16, 32, 64 |
+| `i32`, `u32`, `f32` | 2, 4, 8, 16, 32 |
+| `i64`, `u64`, `f64` | 2, 4, 8, 16 (no `LMUL = 1/8` because `SEW = 64` is illegal at `mf8`) |
+
+This RFC also defines a dedicated fixed-length predicate / mask type family, `vmaskx<nelem>_t`, for this group. Compare operators return `vmaskx<nelem>_t`, and `?:` uses that mask type for lane-wise select (see §5.2.2).
 
 ### 5.2 Type attribute
 
@@ -285,6 +296,8 @@ typedef int vint32x8_t
 ```
 
 The first parameter is the size of the fixed vector (in bytes). The second parameter is the `ABI_VLEN` that this type uses to trigger the vector calling convention. If the second parameter is not given, the default is `ABI_VLEN = 128`.
+
+**Alignment**: `alignof(v<type><width>x<nelem>_t)` equals the element size in bytes (i.e. `element_bits / 8`). For example, `alignof(vint32x4_t) = 4`, `alignof(vfloat64x2_t) = 8`. Rationale: matches the natural alignment of a single lane, so arrays, struct fields, and scalar loads/stores on individual lanes behave predictably; it also matches the alignment of the element type's scalar equivalent. See §7 for the open question of whether to instead align to `ABI_VLEN / 8` (the full vector width).
 
 In practice, the toolchain header expands these typedefs using the `__RVV_VLS_VECTOR_ABI_VLEN` macro (default 128, see §5.5), so end users never need to spell the second parameter by hand:
 
@@ -365,6 +378,38 @@ The specific shape of the allowed conditional form is:
 > - **Diagnostics**: misuse such as mixing a `vmaskx<N>_t` condition with non-matching data vectors, or using the unsupported scalar-broadcast form, should produce RVV-specific diagnostics rather than generic C conversion errors.
 >
 > **Functional fallback**. Toolchains that cannot yet ship the frontend extension MAY omit the `?:` form and provide only the intrinsic form `__riscv_vls_select(cond, lhs, rhs)` with identical semantics. The intrinsic form is the canonical lowering target for the `?:` form; a conforming implementation MUST provide at least the intrinsic form, and SHOULD provide the `?:` form once frontend support is available.
+
+#### 5.2.3 Data vector operators
+
+All supported operators on `v<type><width>x<nelem>_t` are lane-wise and follow GNU vector semantics, except for the three deliberate divergences noted in §5.2.1 (compare, logical `!`, `?:`). This section enumerates the full operator set so that implementations do not need to guess.
+
+| Operator | Supported? | Result type | Notes |
+|---|---|---|---|
+| `+` `-` `*` `/` | yes | same vector | lane-wise; integer `/` by a lane with value `0` is UB (matches GNU vector) |
+| `%` | int only | same vector | lane-wise; mod by `0` in a lane is UB |
+| `&` `\|` `^` `~` | int only | same vector | lane-wise bitwise |
+| `<<` `>>` | int only | same vector | shift count may be either a scalar or a same-element-type vector; per-lane out-of-range counts are UB (matches GNU vector) |
+| `==` `!=` `<` `<=` `>` `>=` | yes | `vmaskx<N>_t` | lane-wise, returns mask (diverges from GNU vector, see §5.2.1) |
+| `!` | yes | `vmaskx<N>_t` | equivalent to lane-wise `== 0`; diverges from GNU vector which returns a same-width integer vector |
+| `&&` `\|\|` | **no** | — | hard error; short-circuit semantics are ill-defined on vectors |
+| `?:` with `vmaskx` cond | yes | same vector | see §5.2.2.3 |
+| `v[i]` | yes | element type | `i` must be an integer constant expression in `[0, nelem)`; non-constant indexing is UB (matches GNU vector); result is an lvalue |
+| Initializer list `{e0, ..., e_{nelem-1}}` | yes | — | exactly `nelem` elements, each implicitly convertible to the element type |
+| Scalar broadcast assignment `v = s` | yes | — | `s` is implicitly converted to the element type and splatted to all lanes |
+| Scalar operand in binary operators (`v + s`, `s + v`, `v & s`, ...) | yes | same vector | the scalar operand is broadcast to all lanes before the lane-wise operation; matches GNU vector |
+| `=` (copy), `+=` `-=` `*=` `/=` `%=` `&=` `\|=` `^=` `<<=` `>>=` | yes (as above) | — | tracks the corresponding binary operator's legality |
+| Increment / decrement `++` `--` | **no** | — | hard error; avoids ambiguity between per-lane and whole-vector semantics |
+| Address-of `&v`, pointer arith on vector pointers | yes | pointer to vector | standard C/C++ semantics |
+
+**Implicit conversions between fixed-length forms**. The three fixed-length kinds in §4.4 interoperate as follows:
+
+| From / To | `v<type><width>x<N>_t` (this RFC) | GNU `vector_size` | `riscv_rvv_vector_bits` VLS |
+|---|---|---|---|
+| `v<type><width>x<N>_t` → | — | **yes, implicit**, when element type and total size match | no, must use `__riscv_convert_vector` |
+| GNU `vector_size` → | **yes, implicit**, when element type and total size match | — | no, must use `__riscv_convert_vector` |
+| `riscv_rvv_vector_bits` VLS → | no, must use `__riscv_convert_vector` | no, must use `__riscv_convert_vector` | — |
+
+Rationale: `v<type><width>x<N>_t` and GNU `vector_size` share the same storage layout for matching (element type, size) pairs, so round-tripping through `__riscv_convert_vector` would be wasted syntax. The only user-visible difference is the calling convention and RVV-specific operator divergences, which are preserved by using the `v<type><width>x<N>_t` form in function signatures. Implicit conversion does **not** extend to sign/width changes (e.g. `vint32x4_t ↔ vuint32x4_t`) — those still require `__riscv_vreinterpret_*` or `__builtin_convertvector`, matching §4.2.
 
 ### 5.3 Why we need this type layer: avoid the cost of the default ABI
 
@@ -456,12 +501,13 @@ vint32x4_t clamp_min(vint32x4_t x, vint32x4_t lo) {
 ```
 
 - The result type of `x < lo` is `vmaskx4_t`. Bit `i` corresponds to lane `i`; 1 means true and 0 means false.
-- `vmaskx4_t` uses bitmask layout. Its size is `max(4 / 8, 1) = 1` byte and its alignment is 1.
+- `vmaskx4_t` uses bitmask layout. Its size is `(4 + 7) / 8 = 1` byte and its alignment is 1.
 - `?:` is a lane-wise select controlled by `vmaskx4_t`.
 - The pass-by-value / return ABI rule of `vmaskx4_t` follows the matching scalable bool vector type `vbool<M>_t` where `M = ABI_VLEN / 4` (e.g. `vbool32_t` at `ABI_VLEN = 128`).
 
 ## 7. Open Issues
 
+- **Alignment choice for `v<type><width>x<nelem>_t`**: this RFC picks `alignof = element_bits / 8` (natural per-lane alignment) to match GNU vector habits and let single-lane scalar loads/stores align trivially. An alternative is `alignof = ABI_VLEN / 8` (128-bit / full-vector alignment at the default), which would match the natural alignment of a whole vector register and may let the compiler use aligned loads/stores unconditionally, at the cost of wasting up to `ABI_VLEN / 8 - element_bits / 8` bytes per array element when these types appear inside arrays or packed structs. The trade-off between "friendly to arrays / struct layout" and "aligned whole-vector load/store" is open; we may revisit before finalizing.
 - **Future extensions**: If new element types (such as fp8) are added later, both the naming rule `v<type><width>x<nelem>_t` and `__riscv_convert_vector` can extend to them naturally.
 
 ## 8. References
