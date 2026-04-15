@@ -426,6 +426,21 @@ Either way, if the callee wants to work on the data in vector registers, it must
 - **Users do not need to add a function attribute by hand**. The design goal is to lower porting cost. If every function needed a manual attribute to use vector cc, performance would be very bad because of the moves.
 - The good thing about letting the type trigger cc: users only need to make the decision once, at the type declaration. All functions that use this type inherit the correct ABI. For example, a third-party library like highway only needs a `typedef` using this type.
 
+#### 5.4.1 All ABI rules defer to the Standard Fixed-length Vector Calling Convention Variant
+
+This RFC does **not** invent its own ABI rules for `v<type><width>x<nelem>_t` and `vmaskx<nelem>_t`. All ABI-level behavior follows the **Standard Fixed-length Vector Calling Convention Variant** defined in [riscv-elf-psabi-doc PR #418](https://github.com/riscv-non-isa/riscv-elf-psabi-doc/pull/418). The macro `__RVV_VLS_VECTOR_ABI_VLEN` (§5.5) is exactly the `ABI_VLEN` parameter of that variant.
+
+Concretely, the psABI variant is the normative source for:
+
+- **Argument / return passing** of individual `v<type><width>x<nelem>_t` and `vmaskx<nelem>_t` values (register classes, spill order, alignment on stack).
+- **Struct / union members**: a struct containing a `rvv_vls_vector_size` type is laid out and passed according to the aggregate rules in the psABI variant. Whether the enclosing function uses the vector calling convention follows the same rule stated above — the presence of such a type in the argument list or return type triggers it, including when the type is nested inside an aggregate (per the psABI's flattening rules).
+- **Function pointer compatibility**: `void (*)(vint32x4_t)` and `void (*)(int)` have different ABIs and are therefore distinct function pointer types. Implicit conversion between them is ill-formed, matching the psABI rule that calling convention is part of the function type.
+- **Variadic arguments**: passing a `rvv_vls_vector_size` type through `...` follows the psABI variant's variadic rule (currently: such types are not permitted in the variadic tail; the compiler must diagnose).
+- **C++ name mangling**: the Itanium-ABI-based mangling for these types is specified by the psABI variant (vendor extended type encoding). This RFC does not redefine it.
+- **Linker ABI consistency**: the chosen `__RVV_VLS_VECTOR_ABI_VLEN` is recorded in `.riscv.attributes` exactly as the psABI variant prescribes, so the linker rejects cross-TU mismatches.
+
+In short: the user-visible surface (type names, `rvv_vls_vector_size` attribute, macro override) is owned by this RFC; the bit-level ABI is owned by PR #418. If the two ever disagree, PR #418 wins and this RFC is the bug.
+
 ### 5.5 Default ABI_VLEN and compatibility handling
 
 - **Default `ABI_VLEN = 128`**, which matches most implementations at zvl128b and above.
