@@ -185,6 +185,7 @@ We do not provide the type-suffix style of Option B as a standard interface. A t
 `__riscv_convert_vector` **only allows src and dst with the same element type**.
 
 - Cross element type bit-cast is not allowed (for example `vint32m1_t ↔ vfloat32m1_t`, `vuint32m1_t ↔ vint32m1_t`).
+- **Signed and unsigned are treated as different element types.** Even though `int32_t` and `uint32_t` share a bit pattern and width, `vint32m1_t ↔ vuint32m1_t` (and the fixed-side equivalents `vint32x4_t ↔ vuint32x4_t`) are rejected by this intrinsic. The reason is the same as for `int ↔ float`: signedness changes how the value is interpreted, which is a reinterpret concern, not a container-length concern. Users who need this must go through `__riscv_vreinterpret_*` (scalable) or a normal C cast through a union / `memcpy` (fixed).
 - Pure sign / float ↔ int reinterpret should use the existing `__riscv_vreinterpret_*` intrinsics.
 - This limit keeps the intrinsic focused on "container type conversion". It does not mix in the reinterpret topic.
 - This also draws a clear line against the built-in `__builtin_convertvector`. `__builtin_convertvector` allows cross element type conversion (but does not guarantee the scalable ↔ fixed low-part insert/extract semantics).
