@@ -253,7 +253,7 @@ To let users **enjoy the RVV vector calling convention without porting effort**,
 - **Minimum number of elements**: **at least 2** (no `x1`, to avoid confusion with scalar).
 - **Maximum total width**: up to `ABI_VLEN × LMUL = 128 × 8 = 1024 bit`, covering all widths matching m1 / m2 / m4 / m8 under ABI_VLEN = 128.
 
-This RFC **does not define a dedicated fixed-length predicate / mask type** for this group. Compare operators return a same-width integer vector. `?:` is separately defined as lane-wise select (see §5.2.1). Fixed-length mask type design is listed as an open issue in §7.
+This RFC also defines a dedicated fixed-length predicate / mask type family, `vboolx<nelem>_t`, for this group. Compare operators return `vboolx<nelem>_t`, and `?:` uses that mask type for lane-wise select (see §5.2.1).
 
 ### 5.2 Type attribute
 
@@ -274,25 +274,52 @@ The first parameter is the size of the fixed vector (in bytes). The second param
 
 #### 5.2.1 Why a new `rvv_vls_vector_size` instead of reusing GNU `vector_size`
 
-The fixed-length vector types in this RFC **follow GNU vector semantics for compare operators and their results**: compare is done lane by lane and returns an **integer vector of the same width and same lane count**. True lane is all ones, false lane is zero. For the conditional operator `?:`, this RFC **additionally defines** that when the condition is this kind of same-width integer vector mask, `cond ? lhs : rhs` does a lane-wise select. This semantics matches the existing behavior of GNU vector in **C++ mode**, and this RFC extends it to **C mode** as well. So C and C++ can use the same form.
+The fixed-length data vector types in this RFC follow GNU-vector-like lane-wise compare semantics, but the compare result type is a dedicated fixed-length mask type: `vboolx<nelem>_t`. Each lane maps to one bit in the mask. Bit value 1 means true, bit value 0 means false. For the conditional operator `?:`, this RFC defines that when the condition is `vboolx<nelem>_t`, `cond ? lhs : rhs` does a lane-wise select. So C and C++ can use the same form.
 
 In other words, this RFC does not claim "every operator is fully equal to GNU vector". Instead:
 
-- **compare**: follows the existing rule of GNU vector.
-- **`?:`**: matches GNU vector semantics in C++ mode, and is explicitly extended to C mode.
+- **compare**: still works lane by lane, but returns `vboolx<nelem>_t` rather than a same-width integer vector.
+- **`?:`**: uses `vboolx<nelem>_t` as the condition type and performs lane-wise select in both C and C++.
 
-Since the compare semantics mostly follow GNU vector, reusing GNU `vector_size` looks like the easiest choice. But this RFC still chooses a separate `rvv_vls_vector_size` attribute, for these reasons:
+Since the data-vector operators still mostly follow GNU vector, reusing GNU `vector_size` looks like the easiest choice. But this RFC still chooses a separate `rvv_vls_vector_size` attribute, for these reasons:
 
 - **Automatically enables the vector calling convention**: `rvv_vls_vector_size` is one attribute that carries three pieces of info: "size", "ABI_VLEN", and "use RVV vector cc". If we reused `vector_size`, we would need to add another marker attribute (like `rvv_vls_vector_cc(ABI_VLEN)`) to enable cc. That makes declarations more verbose and easier to forget.
 - **ABI_VLEN is an RVV-only concept**: GNU `vector_size` is neutral across architectures. Putting an RVV-only parameter like `ABI_VLEN` into it is not a good fit. A separate attribute can carry this info cleanly.
 - **Separates diagnostics and ABI checks from generic GNU vectors**: Types with `rvv_vls_vector_size` are clearly in RVV context. The compiler can give precise messages for RVV-specific cases like `LMUL × ABI_VLEN` consistency or cross-TU ABI_VLEN mismatch. It does not affect the behavior of existing GNU `vector_size`.
-- **Room for future semantics**: If later we want to add RVV-specific operator rules to this type group (for example adding a fixed-length mask type later, or new lane-wise rules), we can evolve them under this attribute family. We do not need to change the general `vector_size`.
+- **Room for RVV-specific semantics**: The fixed-length mask type, its ABI rule, and lane-wise select semantics are RVV-specific. Keeping them under a dedicated attribute family avoids changing the meaning of generic GNU `vector_size`.
 
 The specific limits for `?:` are:
 
-- The condition must be an integer vector mask with the same number of lanes. Usually it is the same-width integer vector produced by a compare.
+- The condition must be `vboolx<nelem>_t`, usually produced by a compare on `v<type><width>x<nelem>_t`.
 - `lhs` and `rhs` must be the same `v<type><width>x<nelem>_t`.
 - This RFC **does not define** the scalar broadcast form `cond ? scalar : vec` or `cond ? vec : scalar`.
+
+This RFC defines the layout and ABI of `vboolx<nelem>_t` as follows:
+
+- **Layout**: bitmask form. Lane `i` maps to bit `i`.
+- **Size**: `sizeof(vboolx<nelem>_t) = max(nelem / 8, 1)` bytes.
+- **Alignment**: `alignof(vboolx<nelem>_t) = 1`.
+- **ABI mapping**: pass-by-value and return follow the same psABI rule as the matching scalable bool vector type `vbool<M>_t`. The exact `M` is the one selected by the element-width / lane-count relation of the producing or consuming operation.
+
+The operator set of `vboolx<nelem>_t` is intentionally small and mask-oriented:
+
+- **Allowed unary operators**: `!`, `~`.
+- **Allowed binary operators**: bitwise `&`, `|`, `^`.
+- **Allowed comparison operators**: `==`, `!=`.
+- **Allowed conditional form**: `cond ? lhs : rhs` where `cond` is `vboolx<nelem>_t` and `lhs` / `rhs` are the same `v<type><width>x<nelem>_t`.
+- **Allowed assignment forms**: initialization, copy assignment, and the compound assignments `&=`, `|=`, `^=`.
+
+The following operators are **not** defined for `vboolx<nelem>_t`:
+
+- **Element access**: `[]`.
+- **Short-circuit logical operators**: `&&`, `||`.
+- **Arithmetic operators**: unary `+` / `-`, binary `+`, `-`, `*`, `/`, `%`.
+- **Shift operators**: `<<`, `>>`, `<<=`, `>>=`.
+- **Ordering comparisons**: `<`, `<=`, `>`, `>=`.
+- **Increment / decrement**: `++`, `--`.
+- **Dereference and member access**: `*`, `->`, `.`.
+
+Reason: `vboolx<nelem>_t` is a packed predicate container, not a data vector. The allowed operators are only those that map cleanly to lane-wise mask algebra without implying scalar truthiness, element lvalues, or arithmetic interpretation.
 
 ### 5.3 Why we need this type layer: avoid the cost of the default ABI
 
@@ -329,7 +356,7 @@ vint32m1_t sv = __riscv_convert_vector(vint32m1_t, v);   // OK, writes to low pa
 vint32x4_t v2 = __riscv_convert_vector(vint32x4_t, sv);  // OK, reads low part
 ```
 
-This RFC only defines scalable ↔ fixed conversion for data vectors (integer / float / bf16). The bridge between fixed-length mask/predicate types and scalable `vbool*` is not in scope. It will be handled later in another proposal (see §7).
+This RFC only defines `__riscv_convert_vector` for scalable ↔ fixed **data** vectors (integer / float / bf16). `vboolx<nelem>_t` is part of this RFC for compare / select and ABI purposes, but mask conversion intrinsics between `vboolx<nelem>_t` and scalable `vbool*` are still outside the scope of this proposal.
 
 ## 6. Usage Examples
 
@@ -371,7 +398,7 @@ void sat_add_and_store(int32x4_t v, int32_t addend, int32_t *out) {
 
 A plain GNU vector does not enable vector cc (no `rvv_vls_vector_size` attribute). But it can still be used as the src/dst of `__riscv_convert_vector`. This lets the user, inside the callee, switch to a scalable intrinsic, do work that operators cannot express, and write out the result through an RVV store.
 
-### 6.3 Compare / select (GNU-like compare + lane-wise `?:`)
+### 6.3 Compare / select (`vboolx<N>_t` + lane-wise `?:`)
 
 ```c
 vint32x4_t clamp_min(vint32x4_t x, vint32x4_t lo) {
@@ -379,22 +406,14 @@ vint32x4_t clamp_min(vint32x4_t x, vint32x4_t lo) {
 }
 ```
 
-- The result type of `x < lo` is a **same-width integer vector** (that is, `vint32x4_t`). True lane is all ones, false lane is zero. The semantics matches GNU vector.
-- `?:` is a lane-wise select. This semantics matches the existing behavior of GNU vector in C++ mode, and this RFC explicitly extends it to C mode.
-- If you need to turn the compare result into an RVV mask register and feed it to a mask-taking intrinsic, you can do it on the scalable side using existing RVV compare intrinsics (for example `__riscv_vmslt_*`). For fixed-length mask type design, see §7.
+- The result type of `x < lo` is `vboolx4_t`. Bit `i` corresponds to lane `i`; 1 means true and 0 means false.
+- `vboolx4_t` uses bitmask layout. Its size is `max(4 / 8, 1) = 1` byte and its alignment is 1.
+- `?:` is a lane-wise select controlled by `vboolx4_t`.
+- The pass-by-value / return ABI rule of `vboolx4_t` follows the matching scalable bool vector type `vbool<M>_t`.
 
 ## 7. Open Issues
 
 - **Future extensions**: If new element types (such as fp8) are added later, both the naming rule `v<type><width>x<nelem>_t` and `__riscv_convert_vector` can extend to them naturally.
-
-- **Fixed-length mask type (deferred)**: An earlier iteration of this RFC considered adding a dedicated fixed-length predicate type (tentatively named `vboolx<nelem>_t`) for `v<type><width>x<nelem>_t`, so compare operators would return that mask type directly. This would let users **connect smoothly to RVV mask intrinsics** (no need for an extra all-ones integer → mask register conversion). After discussion, we decided to **leave this out of this RFC** for now. The main concerns are:
-
-  - **No agreement on layout / ABI**: The storage layout of `vboolx<nelem>_t` (bit-packed vs byte-packed), its `sizeof`, alignment, and pass-by-value ABI all need extra definition. Introducing it without first aligning with psABI is too risky.
-  - **Not a one-to-one match with scalable `vbool*`**: The mask type on the scalable side is determined by the `SEW × LMUL ratio`. But `vboolx<nelem>_t` is decided only by the number of lanes. Compares at different element widths would land on the same fixed mask type. So there is no natural one-to-one mapping between fixed and scalable. The bridge needs extra rules.
-  - **Easy to confuse the names**: `vboolx<nelem>_t` and the RVV scalable mask type `vbool<N>_t` differ by just one `x`. They are easy to misread. Changing to `vmaskx<nelem>_t` starts a new bikeshedding round.
-  - **Conflicts with the GNU vector mental model**: GNU vector compares return a same-width integer vector, and a lot of existing code depends on this. If `v<type><width>x<nelem>_t` uses RVV-style mask return, users need to remember two sets of operator semantics when switching between GNU vector and RVV fixed-length vector. Porting cost goes up.
-
-  Given all of the above, this RFC **first makes the operator semantics of `v<type><width>x<nelem>_t` fully match GNU vector**. Users who need RVV-style masks can go through `__riscv_convert_vector` to a scalable type, then use RVV compare intrinsics. Fixed-length mask type (naming, layout, ABI, and bridge rules with scalable mask) is left to a separate proposal, so it does not delay the main goal of this RFC (scalable ↔ fixed data vector conversion and vector cc trigger).
 
 ## 8. References
 
