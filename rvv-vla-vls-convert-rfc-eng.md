@@ -272,6 +272,17 @@ typedef int vint32x8_t
 
 The first parameter is the size of the fixed vector (in bytes). The second parameter is the `ABI_VLEN` that this type uses to trigger the vector calling convention. If the second parameter is not given, the default is `ABI_VLEN = 128`.
 
+In practice, the toolchain header expands these typedefs using the `__RVV_VLS_VECTOR_ABI_VLEN` macro (default 128, see §5.5), so end users never need to spell the second parameter by hand:
+
+```c
+// Inside <riscv_vector.h> (sketch):
+#ifndef __RVV_VLS_VECTOR_ABI_VLEN
+#  define __RVV_VLS_VECTOR_ABI_VLEN 128
+#endif
+typedef int vint32x4_t
+    __attribute__((rvv_vls_vector_size(16, __RVV_VLS_VECTOR_ABI_VLEN)));
+```
+
 #### 5.2.1 Why a new `rvv_vls_vector_size` instead of reusing GNU `vector_size`
 
 The fixed-length data vector types in this RFC follow GNU-vector-like lane-wise compare semantics, but the compare result type is a dedicated fixed-length mask type: `vmaskx<nelem>_t`. Each lane maps to one bit in the mask. Bit value 1 means true, bit value 0 means false. For the conditional operator `?:`, this RFC defines that when the condition is `vmaskx<nelem>_t`, `cond ? lhs : rhs` does a lane-wise select. So C and C++ can use the same form.
@@ -340,12 +351,16 @@ Either way, if the callee wants to work on the data in vector registers, it must
 ### 5.5 Default ABI_VLEN and compatibility handling
 
 - **Default `ABI_VLEN = 128`**, which matches most implementations at zvl128b and above.
-- **For `zve32*` / `zve64*` environments with VLEN < 128**:
-  - The compiler emits a **warning** and automatically lowers `ABI_VLEN` to the matching `zvl*b`.
+- **User-controlled override via `__RVV_VLS_VECTOR_ABI_VLEN`**:
+  - The toolchain header (e.g. `<riscv_vector.h>`) consults the macro `__RVV_VLS_VECTOR_ABI_VLEN` to pick the `ABI_VLEN` baked into the type definitions.
+  - If the macro is not defined before the header is included, the header defines it to `128`.
+  - To use a different value (e.g. on a `zve32*` target), the user must `#define __RVV_VLS_VECTOR_ABI_VLEN <value>` **before** including the header. The value must be a power of 2 and a valid RVV `zvl*b` value (32, 64, 128, 256, ...).
+  - All translation units that exchange these types must use the same `__RVV_VLS_VECTOR_ABI_VLEN`. The toolchain SHOULD record the chosen value in `.riscv.attributes` so the linker can reject mismatches.
+- **ABI is never silently changed**: if the requested `__RVV_VLS_VECTOR_ABI_VLEN` exceeds what the target `-march` supports (e.g. `__RVV_VLS_VECTOR_ABI_VLEN=128` on `rv64gc_zve32f`), the compiler emits a **hard error**. The previous "warning + auto-lower" behavior is rejected because `ABI_VLEN` is part of the ABI and silently rewriting it produces TUs that disagree on calling convention.
   - Examples:
-    - `rv64gc_zve32f`: uses `ABI_VLEN = 32`, with a warning saying the expected value was 128.
-    - `rv64gc_zve32f_zvl128b`: uses `ABI_VLEN = 128`, **no** warning.
-  - This clearly tells the user that under sub-128 configurations, the ABI across files / libraries is not the default 128. The user must make sure all compilation units stay consistent.
+    - `rv64gc_zve32f` with no user override: error — default 128 exceeds target capability. User must explicitly `#define __RVV_VLS_VECTOR_ABI_VLEN 32` (and accept that this ABI is incompatible with 128-bit builds).
+    - `rv64gc_zve32f_zvl128b`: OK, no override needed.
+    - `rv64gc_zve32f` with `#define __RVV_VLS_VECTOR_ABI_VLEN 32`: OK.
 
 ### 5.6 How this connects with `__riscv_convert_vector`
 
