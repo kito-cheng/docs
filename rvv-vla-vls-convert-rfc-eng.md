@@ -299,27 +299,25 @@ typedef int vint32x4_t
 
 #### 5.2.1 Why a new `rvv_vls_vector_size` instead of reusing GNU `vector_size`
 
-The fixed-length data vector types in this RFC follow GNU-vector-like lane-wise compare semantics, but the compare result type is a dedicated fixed-length mask type: `vmaskx<nelem>_t`. Each lane maps to one bit in the mask. Bit value 1 means true, bit value 0 means false. For the conditional operator `?:`, this RFC defines that when the condition is `vmaskx<nelem>_t`, `cond ? lhs : rhs` does a lane-wise select. So C and C++ can use the same form.
-
-In other words, this RFC does not claim "every operator is fully equal to GNU vector". Instead:
-
-- **compare**: still works lane by lane, but returns `vmaskx<nelem>_t` rather than a same-width integer vector.
-- **`?:`**: uses `vmaskx<nelem>_t` as the condition type and performs lane-wise select in both C and C++.
-
-Since the data-vector operators still mostly follow GNU vector, reusing GNU `vector_size` looks like the easiest choice. But this RFC still chooses a separate `rvv_vls_vector_size` attribute, for these reasons:
+The data-vector operators on `v<type><width>x<nelem>_t` mostly follow GNU vector semantics, so reusing GNU `vector_size` would look like the easiest choice. This RFC nevertheless introduces a dedicated `rvv_vls_vector_size` attribute, for these reasons:
 
 - **Automatically enables the vector calling convention**: `rvv_vls_vector_size` is one attribute that carries three pieces of info: "size", "ABI_VLEN", and "use RVV vector cc". If we reused `vector_size`, we would need to add another marker attribute (like `rvv_vls_vector_cc(ABI_VLEN)`) to enable cc. That makes declarations more verbose and easier to forget.
 - **ABI_VLEN is an RVV-only concept**: GNU `vector_size` is neutral across architectures. Putting an RVV-only parameter like `ABI_VLEN` into it is not a good fit. A separate attribute can carry this info cleanly.
 - **Separates diagnostics and ABI checks from generic GNU vectors**: Types with `rvv_vls_vector_size` are clearly in RVV context. The compiler can give precise messages for RVV-specific cases like `LMUL × ABI_VLEN` consistency or cross-TU ABI_VLEN mismatch. It does not affect the behavior of existing GNU `vector_size`.
-- **Room for RVV-specific semantics**: The fixed-length mask type, its ABI rule, and lane-wise select semantics are RVV-specific. Keeping them under a dedicated attribute family avoids changing the meaning of generic GNU `vector_size`.
+- **Room for RVV-specific semantics**: The fixed-length mask type `vmaskx<nelem>_t`, its ABI rule, and the lane-wise `?:` select form (see §5.2.2) are RVV-specific. Keeping them under a dedicated attribute family avoids changing the meaning of generic GNU `vector_size`.
 
-The specific limits for `?:` are:
+This RFC therefore does **not** claim "every operator on `v<type><width>x<nelem>_t` is equal to GNU vector". The two deliberate divergences are:
 
-- The condition must be `vmaskx<nelem>_t`, usually produced by a compare on `v<type><width>x<nelem>_t`.
-- `lhs` and `rhs` must be the same `v<type><width>x<nelem>_t`.
-- This RFC **does not define** the scalar broadcast form `cond ? scalar : vec` or `cond ? vec : scalar`.
+- **compare** returns `vmaskx<nelem>_t` rather than a same-width integer vector.
+- **`?:`** uses `vmaskx<nelem>_t` as the condition type and performs lane-wise select in both C and C++.
 
-This RFC defines the layout and ABI of `vmaskx<nelem>_t` as follows:
+The complete mask-type spec, the operator set of `vmaskx<nelem>_t`, and the language-extension implications of `?:` are defined in §5.2.2.
+
+#### 5.2.2 Mask type `vmaskx<nelem>_t` and lane-wise select
+
+This section defines the predicate / mask type family `vmaskx<nelem>_t` used by compare operators and the lane-wise `?:` form. Each lane maps to one bit in the mask; bit value 1 means true, bit value 0 means false.
+
+##### 5.2.2.1 Layout, size, alignment, and ABI
 
 - **Layout**: bitmask form. Lane `i` maps to bit `i`.
 - **Size**: `sizeof(vmaskx<nelem>_t) = (nelem + 7) / 8` bytes (i.e. `ceil(nelem / 8)`).
@@ -327,12 +325,14 @@ This RFC defines the layout and ABI of `vmaskx<nelem>_t` as follows:
 - **Valid `nelem`**: `nelem` must be a power of 2 in `[2, ABI_VLEN]` and must satisfy `ABI_VLEN % nelem == 0`. This guarantees a unique matching scalable `vbool<M>_t` exists.
 - **ABI mapping**: pass-by-value and return follow the same psABI rule as the matching scalable bool vector type `vbool<M>_t`, where **`M = ABI_VLEN / nelem`**. `M` is fully determined by the type and the active `ABI_VLEN`; it does not depend on the producing or consuming operation.
 
+##### 5.2.2.2 Allowed and disallowed operators
+
 The operator set of `vmaskx<nelem>_t` is intentionally small and mask-oriented:
 
 - **Allowed unary operators**: `!`, `~`.
 - **Allowed binary operators**: bitwise `&`, `|`, `^`.
 - **Allowed comparison operators**: `==`, `!=`.
-- **Allowed conditional form**: `cond ? lhs : rhs` where `cond` is `vmaskx<nelem>_t` and `lhs` / `rhs` are the same `v<type><width>x<nelem>_t`.
+- **Allowed conditional form**: `cond ? lhs : rhs` where `cond` is `vmaskx<nelem>_t` and `lhs` / `rhs` are the same `v<type><width>x<nelem>_t` (see §5.2.2.3 for the language-extension notice).
 - **Allowed assignment forms**: initialization, copy assignment, and the compound assignments `&=`, `|=`, `^=`.
 
 The following operators are **not** defined for `vmaskx<nelem>_t`:
@@ -346,6 +346,25 @@ The following operators are **not** defined for `vmaskx<nelem>_t`:
 - **Dereference and member access**: `*`, `->`, `.`.
 
 Reason: `vmaskx<nelem>_t` is a packed predicate container, not a data vector. The allowed operators are only those that map cleanly to lane-wise mask algebra without implying scalar truthiness, element lvalues, or arithmetic interpretation.
+
+##### 5.2.2.3 Lane-wise `?:` as a frontend language extension
+
+The specific shape of the allowed conditional form is:
+
+- The condition must be `vmaskx<nelem>_t`, usually produced by a compare on `v<type><width>x<nelem>_t`.
+- `lhs` and `rhs` must be the same `v<type><width>x<nelem>_t`.
+- This RFC **does not define** the scalar broadcast form `cond ? scalar : vec` or `cond ? vec : scalar`.
+
+> **⚠️ Language extension notice**
+>
+> Defining `?:` on `vmaskx<nelem>_t` is **not** purely a library or attribute facility. It changes the C and C++ conditional-expression rules and therefore requires frontend work. Implementers MUST treat this as a separate language-extension item from the attribute / intrinsic parts of this RFC. Specific areas of concern:
+>
+> - **Type deduction of `?:`**: when `cond` is `vmaskx<N>_t`, the usual "common type" rules for the second and third operands must be replaced by the lane-wise select rule (both must be the same `v<type><width>x<N>_t`, no implicit conversions, no scalar broadcast).
+> - **C vs. C++ consistency**: C and C++ specify slightly different conditional-expression rules (lvalue-ness, prvalue conversion, throw-expression handling). Toolchains MUST keep the vector form behaviorally identical in both languages.
+> - **Overload resolution / SFINAE (C++)**: the vector `?:` rule must participate in overload resolution like any other overloaded operator context. Substitution failure (e.g. mismatched element types) should be SFINAE-friendly, not a hard error.
+> - **Diagnostics**: misuse such as mixing a `vmaskx<N>_t` condition with non-matching data vectors, or using the unsupported scalar-broadcast form, should produce RVV-specific diagnostics rather than generic C conversion errors.
+>
+> **Functional fallback**. Toolchains that cannot yet ship the frontend extension MAY omit the `?:` form and provide only the intrinsic form `__riscv_vls_select(cond, lhs, rhs)` with identical semantics. The intrinsic form is the canonical lowering target for the `?:` form; a conforming implementation MUST provide at least the intrinsic form, and SHOULD provide the `?:` form once frontend support is available.
 
 ### 5.3 Why we need this type layer: avoid the cost of the default ABI
 
