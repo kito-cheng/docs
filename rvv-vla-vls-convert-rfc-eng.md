@@ -132,11 +132,24 @@ This ability is very important for real users. It lets the same code run on mach
 
 Today, for fixed-length vectors, we have `riscv_rvv_vector_bits`-based types and GNU vector types. But `riscv_rvv_vector_bits`-based types can only be used in `-mrvv-vector-bits=zvl` mode, and their size always equals VLEN. GNU vector types work in all modes, but their size is fixed (for example `int32x4_t` is always 128 bit). They cannot map to scalable types at different VLEN values.
 
-So in this proposal, we suggest that when a fixed-length vector is smaller than the scalable vector, the mapping is defined as "write to / read from the low part of the scalable vector". This gives cross-VLEN portability and lets the same code run correctly on all machines with VLEN ≥ 128.
+So in this proposal, we suggest that when a fixed-length vector is smaller than the scalable vector, the mapping is defined as "write to / read from the low part of the scalable vector". This gives cross-VLEN portability inside one chosen `ABI_VLEN` world.
 
-The user only needs to write the code for the VLEN = 128 case. For example, if the user uses `int32x4_t`, the conversion semantics between it and `vint32m1_t` are the same on every machine with VLEN ≥ 128. The user does not need to write a different kernel per VLEN.
+**Portability scope**. Code written against a given `__RVV_VLS_VECTOR_ABI_VLEN = X` (see §5.5) is portable across all targets whose `-march` minimum VLEN is ≥ X. The default `X = 128` therefore covers every zvl128b-and-above implementation from a single source:
 
-We also support the case where VLEN < 128, but the compiler will emit a compatibility warning. It tells the user that the cross-VLEN ABI is not the expected 128, and that all compilation units must stay consistent.
+- If the user uses `int32x4_t` with the default `ABI_VLEN = 128`, the conversion semantics between `int32x4_t` and `vint32m1_t` are the same on every machine with VLEN ≥ 128. No per-VLEN kernel is needed.
+
+**Sub-`ABI_VLEN` targets are a separate ABI world**. There is no silent cross-`ABI_VLEN` compatibility. To target sub-128 hardware such as `zve32*_zvl32b`, the user must:
+
+1. Explicitly `#define __RVV_VLS_VECTOR_ABI_VLEN <lower value>` before including the header (see §5.5). The compiler emits a **hard error** when the requested `ABI_VLEN` exceeds `-march`'s minimum VLEN.
+2. Choose scalable types with a larger LMUL so that the size rule in §4.3 still holds. For example, on `zvl32b` a 128-bit fixed vector must convert to `vint32m4_t` (128 ≤ 4 × 32) instead of `vint32m1_t` (128 > 1 × 32).
+
+| Target | Required `__RVV_VLS_VECTOR_ABI_VLEN` | `int32x4_t ↔ vint32m1_t` | `int32x4_t ↔ vint32m4_t` |
+|---|---|---|---|
+| `zvl128b+` | 128 (default) | ✓ | ✓ |
+| `zvl64b` | 64 (must `#define`) | ✗ (128 > 1 × 64) | ✓ (128 ≤ 4 × 64) |
+| `zvl32b` | 32 (must `#define`) | ✗ (128 > 1 × 32) | ✓ (128 ≤ 4 × 32) |
+
+Binaries built with different `__RVV_VLS_VECTOR_ABI_VLEN` values are ABI-incompatible by design; the user chooses the portability ceiling once, at the header include site.
 
 ## 4. Design Decisions
 
@@ -173,7 +186,8 @@ We do not provide the type-suffix style of Option B as a standard interface. A t
   - Semantic limit: Only the low part, the elements that match the fixed vector, are guaranteed to be defined. If a later RVV operation has active results that might read or depend on higher source elements, the result is undefined. The user must make sure the operation only observes the valid low range.
 - **scalable → fixed**: Read from the **low part** of the scalable vector. The high part is discarded.
 - **Size rule**: `fixed_bits ≤ known_min_bits_of_scalable`. If it is larger, it is a **compile-time error**.
-  - `known_min_bits_of_scalable` = `LMUL × zvl*b` using the minimum VLEN setting (not the run-time VLEN).
+  - `known_min_bits_of_scalable` = `LMUL × target_min_VLEN`, where `target_min_VLEN` is the minimum VLEN guaranteed by the active `-march` (the `zvl*b` profile). This is **hardware-determined** and independent of `__RVV_VLS_VECTOR_ABI_VLEN`.
+  - `__RVV_VLS_VECTOR_ABI_VLEN ≤ target_min_VLEN` is already enforced by §5.5, so for any `fixed_bits ≤ LMUL × __RVV_VLS_VECTOR_ABI_VLEN` the size rule automatically holds. On sub-`ABI_VLEN` targets the user is responsible for picking a scalable LMUL large enough (see the table in §3.3).
 
 For example, when `vl` is limited to the number of fixed lanes, and each result lane only depends on the matching input lane (like `vadd` / `vand` / `vsadd`), the operation is usually safe. But if an active result lane might observe a source lane beyond the fixed range, through indexing, slide, cross-lane permutation, or a reduction flow, we cannot assume it is safe just because `vl` is small.
 
